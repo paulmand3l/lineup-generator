@@ -1,4 +1,5 @@
-import { assign, orderBy } from "lodash";
+import { assign, max, orderBy } from "lodash";
+import { v4 as uuid } from "uuid";
 // ========================================================
 // CONFIGURATION & ROSTER SETUP
 // ========================================================
@@ -26,11 +27,15 @@ export type Assignment = {
 
 export type Gender = "M" | "O";
 
-export interface Player {
+export interface BasicPlayer {
   name: string;
   gender: Gender;
   positions: Set<string>; // Allowed positions or tokens ("*", "IF", "OF")
   skill: number; // 1 = worst, 5 = best
+}
+
+export interface Player extends BasicPlayer {
+  id: string;
 }
 
 export interface InningAssignment {
@@ -63,7 +68,7 @@ const positionImportance: { [pos: string]: number } = {
   C: 1,
 };
 
-const players: Player[] = [
+const basicPlayers: BasicPlayer[] = [
   { name: "Paul M", gender: "M", positions: new Set(["*", "P"]), skill: 5 },
   { name: "Alex B", gender: "M", positions: new Set(["OF", "P"]), skill: 4 },
   { name: "David D", gender: "M", positions: new Set(["*"]), skill: 5 },
@@ -97,8 +102,17 @@ const players: Player[] = [
     skill: 3,
   },
 ];
+const players = basicPlayers.map((p) => ({ ...p, id: uuid() }));
+const playersById: { [id: string]: Player } = players.reduce(
+  (acc, p) => (p.id ? assign(acc, { [p.id]: p }) : acc),
+  {}
+);
+const malePlayers = players.filter((p) => p.gender === "M");
+const otherPlayers = players.filter((p) => p.gender !== "M");
 
+const genericNonManId = uuid();
 const genericNonMan: Player = {
+  id: genericNonManId,
   name: "SLOT",
   gender: "O",
   positions: new Set(["*"]),
@@ -201,11 +215,11 @@ function canPlay(player: Player, pos: string): boolean {
 // When there are fewer players than positions, we purposely leave the least‑important
 // positions empty.
 export function randomInningAssignment(players: Player[]): InningAssignment {
-  const malePlayers = shuffle(players.filter((p) => p.gender === "M"));
-  const otherPlayers = shuffle(players.filter((p) => p.gender !== "M"));
-  const allowableMalePlayers = malePlayers.slice(0, maxMenOnField);
-  const remainingMalePlayers = malePlayers.slice(maxMenOnField);
-  const assignablePlayers = [...allowableMalePlayers, ...otherPlayers];
+  const availableMalePlayers = shuffle(malePlayers.slice());
+  const availableOtherPlayers = shuffle(otherPlayers.slice());
+  const allowableMalePlayers = availableMalePlayers.slice(0, maxMenOnField);
+  const remainingMalePlayers = availableMalePlayers.slice(maxMenOnField);
+  const assignablePlayers = [...allowableMalePlayers, ...availableOtherPlayers];
 
   const availablePositions: Position[] = allPositions
     .slice()
@@ -295,7 +309,7 @@ function neighbor(solution: CandidateSolution): CandidateSolution {
   // printTable(solution);
 
   const newSol = cloneSolution(solution);
-  if (Math.random() < 0.7) {
+  if (Math.random() < 1) {
     // Modify one inning’s fielding assignment.
     const inning = pickRandom(newSol.innings);
     const inningNumber = newSol.innings.indexOf(inning) + 1;
@@ -319,7 +333,9 @@ function neighbor(solution: CandidateSolution): CandidateSolution {
           canPlay(firstAssignment.player, a.position)
       );
       if (allowableAssignments.length === 0) {
-        console.log(`No allowable swaps for ${firstAssignment.player.name}`);
+        // console.log(
+        //   `No allowable swaps for ${firstAssignment.player.name} in inning ${inningNumber}`
+        // );
         return newSol;
       }
       secondAssignment = pickRandom(allowableAssignments);
@@ -331,18 +347,21 @@ function neighbor(solution: CandidateSolution): CandidateSolution {
       const allowableAssignments = playingAssignments.filter(
         (a) =>
           a.position !== firstAssignment.position &&
-          canPlay(firstAssignment.player, a.position)
-      )
+          canPlay(firstAssignment.player, a.position) &&
+          canPlay(a.player, firstAssignment.position)
+      );
       if (allowableAssignments.length === 0) {
-        console.log(`No allowable swaps for ${firstAssignment.player.name}`);
+        // console.log(
+        //   `No allowable swaps for ${firstAssignment.player.name} in inning ${inningNumber}`
+        // );
         return newSol;
       }
       secondAssignment = pickRandom(allowableAssignments);
     }
 
-    console.log(
-      `Swapping ${firstAssignment.player.name} (${firstAssignment.position}) and ${secondAssignment.player.name} (${secondAssignment.position}) in inning ${inningNumber}`
-    );
+    // console.log(
+    //   `Swapping ${firstAssignment.player.name} (${firstAssignment.position}) and ${secondAssignment.player.name} (${secondAssignment.position}) in inning ${inningNumber}`
+    // );
 
     const temp = firstAssignment.position;
     firstAssignment.position = secondAssignment.position;
@@ -360,9 +379,11 @@ function neighbor(solution: CandidateSolution): CandidateSolution {
     if (battingOrderToChange.length > 1) {
       const i = randInt(battingOrderToChange.length);
       const j = randInt(battingOrderToChange.length);
-      console.log(
-        `Swapping ${battingOrderToChange[i].name} (${i+1}) and ${battingOrderToChange[j].name} (${j+1}) in the batting order`
-      );
+      // console.log(
+      //   `Swapping ${battingOrderToChange[i].name} (${i + 1}) and ${
+      //     battingOrderToChange[j].name
+      //   } (${j + 1}) in the batting order`
+      // );
       const temp = battingOrderToChange[i];
       battingOrderToChange[i] = battingOrderToChange[j];
       battingOrderToChange[j] = temp;
@@ -377,24 +398,24 @@ function neighbor(solution: CandidateSolution): CandidateSolution {
 // ========================================================
 
 function cost(solution: CandidateSolution): number {
-  console.log("Calculating cost for:");
-  printTable(solution);
+  // console.log("Calculating cost for:");
+  // printTable(solution);
 
   let penalty = 0;
 
-  const sitCounts: number[] = Array(players.length).fill(0);
+  const sitCounts: { [playerId: string]: number } = {};
+  players.forEach((p) => (sitCounts[p.id] = 0));
 
   for (const inning of solution.innings) {
     // ----- Sitting Out Distribution -----
     inning.assignments.forEach((assignment) => {
-      const playerIndex = players.indexOf(assignment.player);
       if (assignment.position === benchPosition) {
-        sitCounts[playerIndex]++;
+        sitCounts[assignment.player.id]++;
       }
     });
 
-    const maxSit = Math.max(...sitCounts);
-    const minSit = Math.min(...sitCounts);
+    const maxSit = Math.max(...Object.values(sitCounts));
+    const minSit = Math.min(...Object.values(sitCounts));
     if (maxSit - minSit > 1) {
       penalty += (maxSit - minSit) * IMBALANCED_SITTING_PENALTY;
     }
@@ -429,12 +450,34 @@ function cost(solution: CandidateSolution): number {
         // Skill penalty:
         // • In playoff games, we want high‑skill players in important positions.
         // • In regular season games, we favor giving lower‑skill players experience in key roles.
-        if (gameType === "playoff") {
-          penalty += importance * (5 - assignment.player.skill) * SKILL_FACTOR;
-        } else {
-          penalty += importance * (assignment.player.skill - 1) * SKILL_FACTOR;
-        }
+        // if (gameType === "playoff") {
+        //   penalty += importance * (5 - assignment.player.skill) * SKILL_FACTOR;
+        // } else {
+        //   penalty += importance * (assignment.player.skill - 1) * SKILL_FACTOR;
+        // }
       });
+  }
+
+  const expectedMaleSitCount =
+    malePlayers.length <= maxMenOnField
+      ? 0
+      : ((malePlayers.length - maxMenOnField) * numInnings) /
+        malePlayers.length;
+  const expectedOtherSitCount =
+    otherPlayers.length <= 10 - maxMenOnField
+      ? 0
+      : ((otherPlayers.length - (10 - maxMenOnField)) * numInnings) /
+        otherPlayers.length;
+
+  for (const playerId in sitCounts) {
+    const player = playersById[playerId];
+    const expectedSitCount =
+      player.gender === "M" ? expectedMaleSitCount : expectedOtherSitCount;
+    const sitCount = sitCounts[playerId];
+    penalty += (sitCount - expectedSitCount) ** 2 * IMBALANCED_SITTING_PENALTY;
+    // console.log(
+    //   `${player.name} expected to sit ${expectedSitCount} times, actually sat ${sitCount} times -> ${penalty}`
+    // );
   }
 
   // ----- Diversity in Fielding Assignments (Regular Season Only) -----
@@ -535,6 +578,9 @@ function simulatedAnnealing(
   let bestCost = currentCost;
   let T = options.initialTemp;
 
+  console.log("Initial solution:");
+  printTable(current);
+
   for (let i = 0; i < options.iterations; i++) {
     const candidate = neighborFunc(current);
     candidate.battingOrder = renderBattingOrder(
@@ -542,9 +588,10 @@ function simulatedAnnealing(
       candidate.otherBattingOrder
     );
     const candidateCost = costFunc(candidate);
+    // console.log(`Candidate cost: ${candidateCost}`);
     const delta = candidateCost - currentCost;
     if (delta < 0 || Math.random() < Math.exp(-delta / T)) {
-      console.log(`Accepting candidate with cost ${candidateCost}`);
+      // console.log(`Accepting candidate with cost ${candidateCost}`);
       current = candidate;
       currentCost = candidateCost;
       if (currentCost < bestCost) {
@@ -553,7 +600,7 @@ function simulatedAnnealing(
       }
     }
     T *= options.coolingRate;
-    console.log(`Iteration ${i + 1}: T=${T}, cost=${currentCost}\n`);
+    // console.log(`Iteration ${i + 1}: T=${T}, cost=${currentCost}\n`);
   }
   return best;
 }
@@ -598,8 +645,8 @@ function printTable(solution: CandidateSolution): void {
 const main = () => {
   const optionsSA: SAOptions = {
     initialTemp: 1000,
-    coolingRate: 0.99,
-    iterations: 100,
+    coolingRate: 0.99999,
+    iterations: 10000000,
   };
 
   const initialSolution = randomSolution();
